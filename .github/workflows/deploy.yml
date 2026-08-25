@@ -1,0 +1,36 @@
+# Gate the candy manifest against the pinned charly.
+name: candy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: candy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: charly/charly/go.mod
+          cache-dependency-path: charly/charly/go.sum
+
+      - name: Build the charly binary from the pinned checkout
+        run: |
+          cd charly/charly && go build -buildvcs=false -ldflags "-X main.BuildCalVer=candy-ci" -o ../../bin/charly .
+
+      - name: The candy manifest validates at the pinned charly
+        run: |
+          cd charly && ../bin/charly box validate -C ..

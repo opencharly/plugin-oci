@@ -1,0 +1,4 @@
+[submodule "charly"]
+	path = charly
+	url = https://github.com/opencharly/charly.git
+	branch = main
