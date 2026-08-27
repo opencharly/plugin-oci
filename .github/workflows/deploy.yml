@@ -19,18 +19,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
+
+      - name: Fetch the pinned charly source (CI-time temp checkout)
+        run: |
+          git clone --depth 1 --branch v2026.238.1242 https://github.com/opencharly/charly.git /tmp/charly
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: charly/charly/go.mod
-          cache-dependency-path: charly/charly/go.sum
+          go-version-file: /tmp/charly/charly/go.mod
+          cache-dependency-path: /tmp/charly/charly/go.sum
 
       - name: Build the charly binary from the pinned checkout
         run: |
-          cd charly/charly && go build -buildvcs=false -ldflags "-X main.BuildCalVer=candy-ci" -o ../../bin/charly .
+          mkdir -p /tmp/charly/bin
+          cd /tmp/charly/charly && go build -buildvcs=false -ldflags "-X main.BuildCalVer=candy-ci" -o /tmp/charly/bin/charly .
 
       - name: The candy manifest validates at the pinned charly
         run: |
-          cd charly && ../bin/charly box validate -C ..
+          /tmp/charly/bin/charly box validate
