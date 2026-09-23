@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -80,6 +81,9 @@ func TestCacheTransportDeterministic(t *testing.T) {
 		if got.Validator != orig.Validator {
 			t.Fatalf("key %q validator = %q, want %q", key, got.Validator, orig.Validator)
 		}
+		if !reflect.DeepEqual(got.Components, orig.Components) {
+			t.Fatalf("key %q components = %v, want %v (lossless claim)", key, got.Components, orig.Components)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(dst, "oci-layout")); err != nil {
 		t.Fatalf("restored layout missing oci-layout marker: %v", err)
@@ -124,8 +128,8 @@ func TestCachePushPullLiveRoundTrip(t *testing.T) {
 }
 
 // TestCacheInsecureOptionParsed pins that Insecure selects name.Insecure — the
-// option that makes a plain-HTTP registry addressable — by asserting a real
-// HTTP reference parses ONLY with it.
+// option that sets the registry SCHEME to http (it does not gate parsing). The
+// parsed reference's scheme is the observable that the option controls.
 func TestCacheInsecureOptionParsed(t *testing.T) {
 	if len(parseOpts(true)) != 1 {
 		t.Fatalf("parseOpts(true) must yield exactly name.Insecure, got %v", parseOpts(true))
@@ -133,10 +137,19 @@ func TestCacheInsecureOptionParsed(t *testing.T) {
 	if len(parseOpts(false)) != 0 {
 		t.Fatalf("parseOpts(false) must yield no options, got %v", parseOpts(false))
 	}
-	// A plain-HTTP (non-TLS) reference is only parseable with name.Insecure —
-	// the exact reason the localhost run succeeds while the default does not.
-	if _, err := name.ParseReference("localhost:5000/charly-cache:tag", parseOpts(true)...); err != nil {
-		t.Fatalf("plain-HTTP ref must parse with Insecure: %v", err)
+	insecure, err := name.ParseReference("registry.example.com/charly-cache:tag", parseOpts(true)...)
+	if err != nil {
+		t.Fatalf("parse with Insecure: %v", err)
+	}
+	secure, err := name.ParseReference("registry.example.com/charly-cache:tag")
+	if err != nil {
+		t.Fatalf("parse without options: %v", err)
+	}
+	if insecure.Context().Registry.Scheme() != "http" {
+		t.Fatalf("Insecure must select the http scheme, got %q", insecure.Context().Registry.Scheme())
+	}
+	if secure.Context().Registry.Scheme() == "http" {
+		t.Fatal("without Insecure a non-localhost registry must use https")
 	}
 }
 
