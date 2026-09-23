@@ -38,7 +38,7 @@ plugin-oci:
             oci_plugin.go shim (still core-side, K1-gated — see that file's own
             migration-inventory note). The MERGE engine's byte-identical relocation is locked
             by the candy's TestMergeEngineGoldenParity (the merged-layer DiffID golden); the
-            cache transport's lossless round-trip by TestCacheLayoutRoundTrip and its live
+            cache transport's lossless round-trip by TestCacheTransportDeterministic and its live
             push/pull by TestCachePushPullLiveRoundTrip (LIVE_REGISTRY-gated).
         plugin:
             source: github.com/opencharly/plugin-oci/candy/plugin-oci
@@ -57,12 +57,12 @@ plugin-oci:
                 - build
               command: "true"
             - # ADE build-context check — the cache transport ships and its lossless layout
-              # round-trip is locked by TestCacheLayoutRoundTrip (a real spec/cache
+              # round-trip is locked by TestCacheTransportDeterministic (a real spec/cache
               # ArtifactStore survives layout.ImageIndex → layout.Write with payloads,
               # components, and validator intact). Deterministic, credential-free; the LIVE
               # push/pull run is TestCachePushPullLiveRoundTrip (LIVE_REGISTRY-gated, skips
               # cleanly when unset).
-              check: the plugin ships the verb:oci cache-push / cache-pull transport for a named spec/cache ArtifactStore (an OCI Image Layout) and its lossless layout round-trip is locked by TestCacheLayoutRoundTrip
+              check: the plugin ships the verb:oci cache-push / cache-pull transport for a named spec/cache ArtifactStore (an OCI Image Layout) and its lossless layout round-trip is locked by TestCacheTransportDeterministic
               id: oci-cache-transport-present
               context:
                 - build

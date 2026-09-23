@@ -3,12 +3,12 @@ package oci
 import (
 	"encoding/json"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/opencharly/spec/cache"
 	pb "github.com/opencharly/spec/proto"
@@ -124,16 +124,19 @@ func TestCachePushPullLiveRoundTrip(t *testing.T) {
 }
 
 // TestCacheInsecureOptionParsed pins that Insecure selects name.Insecure — the
-// option that makes a plain-HTTP registry addressable.
+// option that makes a plain-HTTP registry addressable — by asserting a real
+// HTTP reference parses ONLY with it.
 func TestCacheInsecureOptionParsed(t *testing.T) {
-	if _, err := url.Parse("http://" + "localhost:5000/x:y"); err != nil {
-		t.Fatal(err)
-	}
-	if len(parseOpts(true)) == 0 {
-		t.Fatal("parseOpts(true) must yield name.Insecure for a plain-HTTP registry")
+	if len(parseOpts(true)) != 1 {
+		t.Fatalf("parseOpts(true) must yield exactly name.Insecure, got %v", parseOpts(true))
 	}
 	if len(parseOpts(false)) != 0 {
-		t.Fatal("parseOpts(false) must yield no options")
+		t.Fatalf("parseOpts(false) must yield no options, got %v", parseOpts(false))
+	}
+	// A plain-HTTP (non-TLS) reference is only parseable with name.Insecure —
+	// the exact reason the localhost run succeeds while the default does not.
+	if _, err := name.ParseReference("localhost:5000/charly-cache:tag", parseOpts(true)...); err != nil {
+		t.Fatalf("plain-HTTP ref must parse with Insecure: %v", err)
 	}
 }
 
