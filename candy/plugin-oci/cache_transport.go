@@ -12,8 +12,8 @@
 // bespoke registry code — the Docker cache principle (content-addressed blobs +
 // a manifest/index entry point) reused verbatim.
 //
-// The go-containerregistry stack stays HERE (this candy), reached by charly core
-// and candy/plugin-cache over verb:oci — never linked into spec or core.
+// The go-containerregistry stack stays HERE (this candy): callers reach the
+// transport over verb:oci, so it is never linked into spec or core.
 package oci
 
 import (
