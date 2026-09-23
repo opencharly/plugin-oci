@@ -72,7 +72,11 @@ func (provider) Invoke(_ context.Context, req *pb.InvokeRequest) (*pb.InvokeRepl
 		return mergeLeg(req.GetParamsJson())
 	case "inspect-user":
 		return inspectUserLeg(req.GetParamsJson())
+	case "cache-push":
+		return cachePushLeg(req.GetParamsJson())
+	case "cache-pull":
+		return cachePullLeg(req.GetParamsJson())
 	default:
-		return nil, fmt.Errorf("oci: unknown oci_op %q (want merge|inspect-user)", env.OciOp)
+		return nil, fmt.Errorf("oci: unknown oci_op %q (want merge|inspect-user|cache-push|cache-pull)", env.OciOp)
 	}
 }

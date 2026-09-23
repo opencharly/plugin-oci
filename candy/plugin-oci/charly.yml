@@ -27,13 +27,19 @@ plugin-oci:
             VmOp): oci_op=merge decodes a spec.MergeRequest and returns a spec.MergeReply
             (layer counts + progress Notes the host prints; a per-merge failure rides
             Reply.Error), oci_op=inspect-user decodes a spec.ImageUserInput and returns a
-            spec.UserInfo. `charly box merge` (candy/plugin-box's mergeOneBox, P14) and
-            candy/plugin-build's drive both reach it DIRECTLY via Executor.InvokeProvider
-            (verb:oci) — the F10 peer-dispatch leg; the ONE remaining core consumer is
-            generate.go's adopt-user resolution, reached via the oci_plugin.go shim (still
-            core-side, K1-gated — see that file's own migration-inventory note). The MERGE
-            engine's byte-identical relocation is locked by the candy's
-            TestMergeEngineGoldenParity (the merged-layer DiffID golden).
+            spec.UserInfo, and oci_op=cache-push / cache-pull move a whole named
+            spec/cache.ArtifactStore (already a standard OCI Image Layout) to and from an
+            OCI registry — the registry transport for the OCI-manifest-native cache
+            (opencharly/spec#148): push = layout.ImageIndex → remote.WriteIndex, pull =
+            remote.Index → layout.Write, auth via authn.DefaultKeychain. `charly box merge`
+            (candy/plugin-box's mergeOneBox, P14) and candy/plugin-build's drive both reach it
+            DIRECTLY via Executor.InvokeProvider (verb:oci) — the F10 peer-dispatch leg; the
+            ONE remaining core consumer is generate.go's adopt-user resolution, reached via the
+            oci_plugin.go shim (still core-side, K1-gated — see that file's own
+            migration-inventory note). The MERGE engine's byte-identical relocation is locked
+            by the candy's TestMergeEngineGoldenParity (the merged-layer DiffID golden); the
+            cache transport's lossless round-trip by TestCacheTransportDeterministic and its live
+            push/pull by TestCachePushPullLiveRoundTrip (LIVE_REGISTRY-gated).
         plugin:
             source: github.com/opencharly/plugin-oci/candy/plugin-oci
             providers:
@@ -47,6 +53,17 @@ plugin-oci:
               # OCI-consuming box builds. Deterministic, credential-free.
               check: the out-of-tree plugin ships a buildable Go module providing verb:oci (the externalized OCI merge + adopt-user engine, carrying the go-containerregistry stack) the host can build, compile in, and serve; the merge engine's byte-identical relocation is locked by TestMergeEngineGoldenParity
               id: oci-plugin-builds
+              context:
+                - build
+              command: "true"
+            - # ADE build-context check — the cache transport ships and its lossless layout
+              # round-trip is locked by TestCacheTransportDeterministic (a real spec/cache
+              # ArtifactStore survives layout.ImageIndex → layout.Write with payloads,
+              # components, and validator intact). Deterministic, credential-free; the LIVE
+              # push/pull run is TestCachePushPullLiveRoundTrip (LIVE_REGISTRY-gated, skips
+              # cleanly when unset).
+              check: the plugin ships the verb:oci cache-push / cache-pull transport for a named spec/cache ArtifactStore (an OCI Image Layout) and its lossless layout round-trip is locked by TestCacheTransportDeterministic
+              id: oci-cache-transport-present
               context:
                 - build
               command: "true"
