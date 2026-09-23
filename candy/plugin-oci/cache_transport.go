@@ -53,7 +53,9 @@ type CacheTransferReply struct {
 
 // cachePushLeg is oci_op=cache-push: read the named-cache OCI layout and push its
 // index (and every referenced manifest/blob) to the registry. Lossless: the
-// registry then holds a byte-identical OCI image whose index is the cache.
+// registry then holds a byte-identical OCI image whose index is the cache. A
+// failure is a real Go error (the transport is NOT best-effort — the caller must
+// see a push/pull failure, not a success-shaped reply).
 func cachePushLeg(paramsJSON []byte) (*pb.InvokeReply, error) {
 	var req CacheTransferRequest
 	if len(paramsJSON) > 0 {
@@ -61,7 +63,10 @@ func cachePushLeg(paramsJSON []byte) (*pb.InvokeReply, error) {
 			return nil, fmt.Errorf("oci cache-push: decode request: %w", err)
 		}
 	}
-	reply := runCachePush(req)
+	reply, err := runCachePush(req)
+	if err != nil {
+		return nil, fmt.Errorf("oci cache-push: %w", err)
+	}
 	j, err := json.Marshal(reply)
 	if err != nil {
 		return nil, fmt.Errorf("oci cache-push: encode reply: %w", err)
@@ -79,7 +84,10 @@ func cachePullLeg(paramsJSON []byte) (*pb.InvokeReply, error) {
 			return nil, fmt.Errorf("oci cache-pull: decode request: %w", err)
 		}
 	}
-	reply := runCachePull(req)
+	reply, err := runCachePull(req)
+	if err != nil {
+		return nil, fmt.Errorf("oci cache-pull: %w", err)
+	}
 	j, err := json.Marshal(reply)
 	if err != nil {
 		return nil, fmt.Errorf("oci cache-pull: encode reply: %w", err)
@@ -87,54 +95,24 @@ func cachePullLeg(paramsJSON []byte) (*pb.InvokeReply, error) {
 	return &pb.InvokeReply{ResultJson: j}, nil
 }
 
-// runCachePush reads the layout at req.Dir and pushes it to req.Ref. An error
-// rides reply.Ref="" + the error string in Digest? No — the reply-error
-// convention used by merge is a field; here a failure returns a non-nil Go error
-// so the Invoke surfaces it (the transport is not best-effort).
-func runCachePush(req CacheTransferRequest) CacheTransferReply {
-	reply := CacheTransferReply{Ref: req.Ref}
+// runCachePush reads the layout at req.Dir and pushes it to req.Ref. It is
+// injectable for tests via cachePushFn (an in-memory registry in the default
+// suite; the live registry in the LIVE test).
+func runCachePush(req CacheTransferRequest) (CacheTransferReply, error) {
 	lp, err := layout.FromPath(req.Dir)
 	if err != nil {
-		// layout.FromPath does not require index.json, but the store always has
-		// one after a write; a missing layout is a real error.
-		return CacheTransferReply{Ref: "", Digest: "error: " + err.Error()}
+		return CacheTransferReply{}, fmt.Errorf("open layout %s: %w", req.Dir, err)
 	}
 	ii, err := lp.ImageIndex()
 	if err != nil {
-		return CacheTransferReply{Ref: "", Digest: "error: " + err.Error()}
+		return CacheTransferReply{}, fmt.Errorf("read layout index: %w", err)
 	}
 	ref, err := name.ParseReference(req.Ref, parseOpts(req.Insecure)...)
 	if err != nil {
-		return CacheTransferReply{Ref: "", Digest: "error: " + err.Error()}
+		return CacheTransferReply{}, fmt.Errorf("parse ref %q: %w", req.Ref, err)
 	}
-	if err := remote.WriteIndex(ref, ii, remoteOpts(req.Insecure)...); err != nil {
-		return CacheTransferReply{Ref: "", Digest: "error: " + err.Error()}
-	}
-	reply.Ref = ref.String()
-	if dgst, derr := ii.Digest(); derr == nil {
-		reply.Digest = dgst.String()
-	}
-	if im, ierr := ii.IndexManifest(); ierr == nil {
-		reply.Entries = len(im.Manifests)
-	}
-	return reply
-}
-
-// runCachePull fetches req.Ref and writes the whole index into req.Dir.
-func runCachePull(req CacheTransferRequest) CacheTransferReply {
-	ref, err := name.ParseReference(req.Ref, parseOpts(req.Insecure)...)
-	if err != nil {
-		return CacheTransferReply{Ref: "", Digest: "error: " + err.Error()}
-	}
-	ii, err := remote.Index(ref, remoteOpts(req.Insecure)...)
-	if err != nil {
-		return CacheTransferReply{Ref: "", Digest: "error: " + err.Error()}
-	}
-	if err := os.MkdirAll(filepath.Dir(req.Dir), 0o755); err != nil {
-		return CacheTransferReply{Ref: "", Digest: "error: " + err.Error()}
-	}
-	if _, err := layout.Write(req.Dir, ii); err != nil {
-		return CacheTransferReply{Ref: "", Digest: "error: " + err.Error()}
+	if err := remote.WriteIndex(ref, ii, remoteOpts()...); err != nil {
+		return CacheTransferReply{}, fmt.Errorf("push to %s: %w", ref, err)
 	}
 	reply := CacheTransferReply{Ref: ref.String()}
 	if dgst, derr := ii.Digest(); derr == nil {
@@ -143,12 +121,38 @@ func runCachePull(req CacheTransferRequest) CacheTransferReply {
 	if im, ierr := ii.IndexManifest(); ierr == nil {
 		reply.Entries = len(im.Manifests)
 	}
-	return reply
+	return reply, nil
 }
 
-// parseOpts / remoteOpts translate the Insecure flag to go-containerregistry
-// options: a localhost/plain-HTTP dev registry needs name.Insecure and a
-// transport that permits it.
+// runCachePull fetches req.Ref and writes the whole index into req.Dir.
+func runCachePull(req CacheTransferRequest) (CacheTransferReply, error) {
+	ref, err := name.ParseReference(req.Ref, parseOpts(req.Insecure)...)
+	if err != nil {
+		return CacheTransferReply{}, fmt.Errorf("parse ref %q: %w", req.Ref, err)
+	}
+	ii, err := remote.Index(ref, remoteOpts()...)
+	if err != nil {
+		return CacheTransferReply{}, fmt.Errorf("pull %s: %w", ref, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(req.Dir), 0o755); err != nil {
+		return CacheTransferReply{}, err
+	}
+	if _, err := layout.Write(req.Dir, ii); err != nil {
+		return CacheTransferReply{}, fmt.Errorf("write layout %s: %w", req.Dir, err)
+	}
+	reply := CacheTransferReply{Ref: ref.String()}
+	if dgst, derr := ii.Digest(); derr == nil {
+		reply.Digest = dgst.String()
+	}
+	if im, ierr := ii.IndexManifest(); ierr == nil {
+		reply.Entries = len(im.Manifests)
+	}
+	return reply, nil
+}
+
+// parseOpts translates the Insecure flag to a name option: a plain-HTTP
+// registry (a localhost dev registry) needs name.Insecure. The remote options
+// need no equivalent — name.Insecure is what selects the scheme.
 func parseOpts(insecure bool) []name.Option {
 	if insecure {
 		return []name.Option{name.Insecure}
@@ -156,11 +160,12 @@ func parseOpts(insecure bool) []name.Option {
 	return nil
 }
 
-func remoteOpts(insecure bool) []remote.Option {
-	opts := []remote.Option{
+// remoteOpts is the fixed remote client option set: context + the docker-config
+// keychain (credential helpers). The plain-HTTP case is handled by name.Insecure
+// in parseOpts, so this takes no argument.
+func remoteOpts() []remote.Option {
+	return []remote.Option{
 		remote.WithContext(context.Background()),
 		remote.WithAuthFromKeychain(authn.DefaultKeychain),
 	}
-	_ = insecure
-	return opts
 }

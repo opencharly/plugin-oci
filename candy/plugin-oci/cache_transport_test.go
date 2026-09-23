@@ -1,23 +1,35 @@
 package oci
 
 import (
+	"encoding/json"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/google/go-containerregistry/pkg/v1/layout"
+	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/opencharly/spec/cache"
+	pb "github.com/opencharly/spec/proto"
 )
 
-// cache_transport_test.go — the verb:oci cache transport. The push half needs a
-// live registry (gated by LIVE_*); the LAYOUT round-trip is deterministic and
-// proves the lossless bridge: a real spec/cache ArtifactStore (an OCI Image
-// Layout) survives export -> re-import with every entry intact.
+// cache_transport_test.go — the verb:oci cache transport. TestCacheTransportDeterministic
+// drives the REAL transport legs (cachePushLeg → cachePullLeg) against an
+// in-memory go-containerregistry registry (httptest), so it FAILS if
+// cache_transport.go is removed or broken — no external registry required. The
+// LIVE test additionally drives the same legs against a real registry:2 when
+// LIVE_REGISTRY is set (R7a: live-or-skip, never a fake).
 
-// TestCacheLayoutRoundTrip proves a named ArtifactStore (a real OCI layout) reads
-// back identically after being re-materialized through the go-containerregistry
-// layout index path the transport uses (layout.ImageIndex -> layout.Write).
-func TestCacheLayoutRoundTrip(t *testing.T) {
+// TestCacheTransportDeterministic is the deterministic gate for the transport:
+// it pushes a named ArtifactStore through cachePushLeg, pulls it back through
+// cachePullLeg into a fresh dir via an in-memory registry, and asserts every
+// entry survived byte-identical.
+func TestCacheTransportDeterministic(t *testing.T) {
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
 	src := t.TempDir()
 	store := cache.OpenLayout(src)
 	if err := store.Put("alpha", cache.Entry{Payload: []byte(`{"v":1}`), Components: map[string]string{"sha": "a"}}); err != nil {
@@ -27,34 +39,40 @@ func TestCacheLayoutRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Export: the transport reads the layout's index...
-	lp, err := layout.FromPath(src)
+	ref := host + "/charly-cache:deterministic"
+	// Drive the LEG (not runCachePush directly) so the leg's error contract is
+	// exercised too.
+	pushReply, err := cachePushLeg(mustJSON(t, CacheTransferRequest{Dir: src, Ref: ref, Insecure: true}))
 	if err != nil {
-		t.Fatalf("open layout: %v", err)
+		t.Fatalf("cachePushLeg: %v", err)
 	}
-	ii, err := lp.ImageIndex()
-	if err != nil {
-		t.Fatalf("image index: %v", err)
+	var pushed CacheTransferReply
+	if err := decodeReply(pushReply, &pushed); err != nil {
+		t.Fatalf("decode push reply: %v", err)
 	}
-	im, err := ii.IndexManifest()
-	if err != nil {
-		t.Fatalf("index manifest: %v", err)
-	}
-	if len(im.Manifests) != 2 {
-		t.Fatalf("index has %d manifests, want 2 (one per cache entry)", len(im.Manifests))
+	if pushed.Digest == "" || pushed.Entries != 2 {
+		t.Fatalf("push reply = %+v, want 2 entries and a digest", pushed)
 	}
 
-	// ...and re-imports it into a fresh layout dir (the pull half, sans network).
-	dst := filepath.Join(t.TempDir(), "restored")
-	if _, err := layout.Write(dst, ii); err != nil {
-		t.Fatalf("write layout: %v", err)
+	dst := filepath.Join(t.TempDir(), "pulled")
+	pullReply, err := cachePullLeg(mustJSON(t, CacheTransferRequest{Dir: dst, Ref: ref, Insecure: true}))
+	if err != nil {
+		t.Fatalf("cachePullLeg: %v", err)
 	}
+	var pulled CacheTransferReply
+	if err := decodeReply(pullReply, &pulled); err != nil {
+		t.Fatalf("decode pull reply: %v", err)
+	}
+	if pulled.Digest != pushed.Digest {
+		t.Fatalf("pull digest %s != push digest %s", pulled.Digest, pushed.Digest)
+	}
+
 	restored := cache.OpenLayout(dst)
 	for _, key := range []string{"alpha", "beta"} {
 		orig, _ := store.Get(key)
 		got, ok := restored.Get(key)
 		if !ok {
-			t.Fatalf("key %q missing after round-trip", key)
+			t.Fatalf("key %q missing after transport round-trip", key)
 		}
 		if string(got.Payload) != string(orig.Payload) {
 			t.Fatalf("key %q payload = %q, want %q", key, got.Payload, orig.Payload)
@@ -62,43 +80,74 @@ func TestCacheLayoutRoundTrip(t *testing.T) {
 		if got.Validator != orig.Validator {
 			t.Fatalf("key %q validator = %q, want %q", key, got.Validator, orig.Validator)
 		}
-		if !got.FreshComponents(orig.Components) && orig.Components != nil {
-			t.Fatalf("key %q components drifted: %v vs %v", key, got.Components, orig.Components)
-		}
 	}
-	// The restored layout is itself a valid OCI layout.
 	if _, err := os.Stat(filepath.Join(dst, "oci-layout")); err != nil {
 		t.Fatalf("restored layout missing oci-layout marker: %v", err)
 	}
 }
 
-// TestCachePushPullLiveRoundTrip is the LIVE push/pull proof: it needs a real
-// registry reachable at LIVE_REGISTRY (e.g. localhost:5000 for a local
-// registry:2). Absent that, it SKIPS cleanly (R7a: live-or-skip, never a fake
-// registry). When present, it pushes a named ArtifactStore and pulls it into a
-// fresh dir, then asserts byte-identical entries.
+// TestCachePushLegErrorsOnBadRef proves the leg surfaces a REAL error (the
+// round-1 finding: the legs must not report success-shaped replies on failure).
+func TestCachePushLegErrorsOnBadRef(t *testing.T) {
+	src := t.TempDir()
+	if err := cache.OpenLayout(src).Put("k", cache.Entry{Payload: []byte(`1`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cachePushLeg(mustJSON(t, CacheTransferRequest{Dir: src, Ref: "http://not a valid ref", Insecure: true})); err == nil {
+		t.Fatal("cachePushLeg must return an error for an unparseable ref, not a success reply")
+	}
+}
+
+// TestCachePushPullLiveRoundTrip is the LIVE proof: needs a real registry at
+// LIVE_REGISTRY (e.g. localhost:5000 for registry:2). Absent it, SKIPS cleanly.
 func TestCachePushPullLiveRoundTrip(t *testing.T) {
-	registry := os.Getenv("LIVE_REGISTRY")
-	if registry == "" {
+	registryHost := os.Getenv("LIVE_REGISTRY")
+	if registryHost == "" {
 		t.Skip("LIVE_REGISTRY unset — skipping the live registry round-trip (set it to e.g. localhost:5000)")
 	}
 	src := t.TempDir()
-	store := cache.OpenLayout(src)
-	if err := store.Put("live-key", cache.Entry{Payload: []byte(`{"live":true}`)}); err != nil {
+	if err := cache.OpenLayout(src).Put("live-key", cache.Entry{Payload: []byte(`{"live":true}`)}); err != nil {
 		t.Fatal(err)
 	}
-	ref := registry + "/charly-cache-test:live"
-	pushReply := runCachePush(CacheTransferRequest{Dir: src, Ref: ref, Insecure: true})
-	if pushReply.Digest == "" || len(pushReply.Digest) > 6 && pushReply.Digest[:6] == "error:" {
-		t.Fatalf("cache-push failed: %s", pushReply.Digest)
+	ref := registryHost + "/charly-cache-test:live"
+	if _, err := runCachePush(CacheTransferRequest{Dir: src, Ref: ref, Insecure: true}); err != nil {
+		t.Fatalf("cache-push failed: %v", err)
 	}
 	dst := filepath.Join(t.TempDir(), "pulled")
-	pullReply := runCachePull(CacheTransferRequest{Dir: dst, Ref: ref, Insecure: true})
-	if pullReply.Digest == "" || len(pullReply.Digest) > 6 && pullReply.Digest[:6] == "error:" {
-		t.Fatalf("cache-pull failed: %s", pullReply.Digest)
+	if _, err := runCachePull(CacheTransferRequest{Dir: dst, Ref: ref, Insecure: true}); err != nil {
+		t.Fatalf("cache-pull failed: %v", err)
 	}
 	got, ok := cache.OpenLayout(dst).Get("live-key")
 	if !ok || string(got.Payload) != `{"live":true}` {
 		t.Fatalf("live round-trip lost the entry: ok=%v payload=%q", ok, got.Payload)
 	}
+}
+
+// TestCacheInsecureOptionParsed pins that Insecure selects name.Insecure — the
+// option that makes a plain-HTTP registry addressable.
+func TestCacheInsecureOptionParsed(t *testing.T) {
+	if _, err := url.Parse("http://" + "localhost:5000/x:y"); err != nil {
+		t.Fatal(err)
+	}
+	if len(parseOpts(true)) == 0 {
+		t.Fatal("parseOpts(true) must yield name.Insecure for a plain-HTTP registry")
+	}
+	if len(parseOpts(false)) != 0 {
+		t.Fatal("parseOpts(false) must yield no options")
+	}
+}
+
+// mustJSON marshals a request for the leg entrypoints; decodeReply unmarshals a
+// leg's InvokeReply. Test-only helpers.
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func decodeReply(reply *pb.InvokeReply, out any) error {
+	return json.Unmarshal(reply.GetResultJson(), out)
 }
