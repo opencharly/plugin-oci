@@ -95,9 +95,10 @@ func cachePullLeg(paramsJSON []byte) (*pb.InvokeReply, error) {
 	return &pb.InvokeReply{ResultJson: j}, nil
 }
 
-// runCachePush reads the layout at req.Dir and pushes it to req.Ref. It is
-// injectable for tests via cachePushFn (an in-memory registry in the default
-// suite; the live registry in the LIVE test).
+// runCachePush reads the layout at req.Dir and pushes it to req.Ref. The tests
+// drive the real legs (cachePushLeg/cachePullLeg) against an in-memory registry
+// (default suite) or a real registry (LIVE_REGISTRY) — the registry is reached
+// through req.Ref, so no injection seam exists.
 func runCachePush(req CacheTransferRequest) (CacheTransferReply, error) {
 	lp, err := layout.FromPath(req.Dir)
 	if err != nil {
