@@ -28,28 +28,14 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	pb "github.com/opencharly/spec/proto"
+	"github.com/opencharly/spec/spec"
 )
 
-// CacheTransferRequest is the verb:oci cache transport input: the local OCI
-// layout directory and the registry reference. It rides ParamsJson in the same
-// envelope as merge/inspect-user (this verb is a pure internal RPC keyed by the
-// OciOp discriminator; it ships no authored schema).
-type CacheTransferRequest struct {
-	// Dir is the named cache's OCI Image Layout directory (the ArtifactStore root).
-	Dir string `json:"dir"`
-	// Ref is the registry reference: host/repo:tag (the tag names the cache).
-	Ref string `json:"ref"`
-	// Insecure allows a plain-HTTP registry (a localhost dev registry).
-	Insecure bool `json:"insecure,omitempty"`
-}
-
-// CacheTransferReply is the transport result: the resolved digest and the count
-// of entries (manifest descriptors) moved.
-type CacheTransferReply struct {
-	Digest  string `json:"digest"`
-	Entries int    `json:"entries"`
-	Ref     string `json:"ref"`
-}
+// CacheTransferRequest / CacheTransferReply are the CUE-single-sourced
+// spec.CacheTransferRequest / spec.CacheTransferReply wire pair (spec/schema/
+// oci.cue, spec#149). They are NOT re-declared here: a second hand-written copy
+// would drift from the type candy/plugin-cache's `charly cache push/pull` leaves
+// marshal (R3).
 
 // cachePushLeg is oci_op=cache-push: read the named-cache OCI layout and push its
 // index (and every referenced manifest/blob) to the registry. Lossless: the
@@ -57,7 +43,7 @@ type CacheTransferReply struct {
 // failure is a real Go error (the transport is NOT best-effort — the caller must
 // see a push/pull failure, not a success-shaped reply).
 func cachePushLeg(paramsJSON []byte) (*pb.InvokeReply, error) {
-	var req CacheTransferRequest
+	var req spec.CacheTransferRequest
 	if len(paramsJSON) > 0 {
 		if err := json.Unmarshal(paramsJSON, &req); err != nil {
 			return nil, fmt.Errorf("oci cache-push: decode request: %w", err)
@@ -78,7 +64,7 @@ func cachePushLeg(paramsJSON []byte) (*pb.InvokeReply, error) {
 // it into the local OCI layout directory (creating it). A pulled named cache
 // reads back through the SAME spec/cache ArtifactStore with no conversion.
 func cachePullLeg(paramsJSON []byte) (*pb.InvokeReply, error) {
-	var req CacheTransferRequest
+	var req spec.CacheTransferRequest
 	if len(paramsJSON) > 0 {
 		if err := json.Unmarshal(paramsJSON, &req); err != nil {
 			return nil, fmt.Errorf("oci cache-pull: decode request: %w", err)
@@ -99,23 +85,23 @@ func cachePullLeg(paramsJSON []byte) (*pb.InvokeReply, error) {
 // drive the real legs (cachePushLeg/cachePullLeg) against an in-memory registry
 // (default suite) or a real registry (LIVE_REGISTRY) — the registry is reached
 // through req.Ref, so no injection seam exists.
-func runCachePush(req CacheTransferRequest) (CacheTransferReply, error) {
+func runCachePush(req spec.CacheTransferRequest) (spec.CacheTransferReply, error) {
 	lp, err := layout.FromPath(req.Dir)
 	if err != nil {
-		return CacheTransferReply{}, fmt.Errorf("open layout %s: %w", req.Dir, err)
+		return spec.CacheTransferReply{}, fmt.Errorf("open layout %s: %w", req.Dir, err)
 	}
 	ii, err := lp.ImageIndex()
 	if err != nil {
-		return CacheTransferReply{}, fmt.Errorf("read layout index: %w", err)
+		return spec.CacheTransferReply{}, fmt.Errorf("read layout index: %w", err)
 	}
 	ref, err := name.ParseReference(req.Ref, parseOpts(req.Insecure)...)
 	if err != nil {
-		return CacheTransferReply{}, fmt.Errorf("parse ref %q: %w", req.Ref, err)
+		return spec.CacheTransferReply{}, fmt.Errorf("parse ref %q: %w", req.Ref, err)
 	}
 	if err := remote.WriteIndex(ref, ii, remoteOpts()...); err != nil {
-		return CacheTransferReply{}, fmt.Errorf("push to %s: %w", ref, err)
+		return spec.CacheTransferReply{}, fmt.Errorf("push to %s: %w", ref, err)
 	}
-	reply := CacheTransferReply{Ref: ref.String()}
+	reply := spec.CacheTransferReply{Ref: ref.String()}
 	if dgst, derr := ii.Digest(); derr == nil {
 		reply.Digest = dgst.String()
 	}
@@ -126,22 +112,22 @@ func runCachePush(req CacheTransferRequest) (CacheTransferReply, error) {
 }
 
 // runCachePull fetches req.Ref and writes the whole index into req.Dir.
-func runCachePull(req CacheTransferRequest) (CacheTransferReply, error) {
+func runCachePull(req spec.CacheTransferRequest) (spec.CacheTransferReply, error) {
 	ref, err := name.ParseReference(req.Ref, parseOpts(req.Insecure)...)
 	if err != nil {
-		return CacheTransferReply{}, fmt.Errorf("parse ref %q: %w", req.Ref, err)
+		return spec.CacheTransferReply{}, fmt.Errorf("parse ref %q: %w", req.Ref, err)
 	}
 	ii, err := remote.Index(ref, remoteOpts()...)
 	if err != nil {
-		return CacheTransferReply{}, fmt.Errorf("pull %s: %w", ref, err)
+		return spec.CacheTransferReply{}, fmt.Errorf("pull %s: %w", ref, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(req.Dir), 0o755); err != nil {
-		return CacheTransferReply{}, err
+		return spec.CacheTransferReply{}, err
 	}
 	if _, err := layout.Write(req.Dir, ii); err != nil {
-		return CacheTransferReply{}, fmt.Errorf("write layout %s: %w", req.Dir, err)
+		return spec.CacheTransferReply{}, fmt.Errorf("write layout %s: %w", req.Dir, err)
 	}
-	reply := CacheTransferReply{Ref: ref.String()}
+	reply := spec.CacheTransferReply{Ref: ref.String()}
 	if dgst, derr := ii.Digest(); derr == nil {
 		reply.Digest = dgst.String()
 	}

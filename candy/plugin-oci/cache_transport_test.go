@@ -13,6 +13,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/registry"
 	"github.com/opencharly/spec/cache"
 	pb "github.com/opencharly/spec/proto"
+	"github.com/opencharly/spec/spec"
 )
 
 // cache_transport_test.go — the verb:oci cache transport. TestCacheTransportDeterministic
@@ -43,11 +44,11 @@ func TestCacheTransportDeterministic(t *testing.T) {
 	ref := host + "/charly-cache:deterministic"
 	// Drive the LEG (not runCachePush directly) so the leg's error contract is
 	// exercised too.
-	pushReply, err := cachePushLeg(mustJSON(t, CacheTransferRequest{Dir: src, Ref: ref, Insecure: true}))
+	pushReply, err := cachePushLeg(mustJSON(t, spec.CacheTransferRequest{Dir: src, Ref: ref, Insecure: true}))
 	if err != nil {
 		t.Fatalf("cachePushLeg: %v", err)
 	}
-	var pushed CacheTransferReply
+	var pushed spec.CacheTransferReply
 	if err := decodeReply(pushReply, &pushed); err != nil {
 		t.Fatalf("decode push reply: %v", err)
 	}
@@ -56,11 +57,11 @@ func TestCacheTransportDeterministic(t *testing.T) {
 	}
 
 	dst := filepath.Join(t.TempDir(), "pulled")
-	pullReply, err := cachePullLeg(mustJSON(t, CacheTransferRequest{Dir: dst, Ref: ref, Insecure: true}))
+	pullReply, err := cachePullLeg(mustJSON(t, spec.CacheTransferRequest{Dir: dst, Ref: ref, Insecure: true}))
 	if err != nil {
 		t.Fatalf("cachePullLeg: %v", err)
 	}
-	var pulled CacheTransferReply
+	var pulled spec.CacheTransferReply
 	if err := decodeReply(pullReply, &pulled); err != nil {
 		t.Fatalf("decode pull reply: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestCachePushLegErrorsOnBadRef(t *testing.T) {
 	if err := cache.OpenLayout(src).Put("k", cache.Entry{Payload: []byte(`1`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cachePushLeg(mustJSON(t, CacheTransferRequest{Dir: src, Ref: "http://not a valid ref", Insecure: true})); err == nil {
+	if _, err := cachePushLeg(mustJSON(t, spec.CacheTransferRequest{Dir: src, Ref: "http://not a valid ref", Insecure: true})); err == nil {
 		t.Fatal("cachePushLeg must return an error for an unparseable ref, not a success reply")
 	}
 }
@@ -114,11 +115,11 @@ func TestCachePushPullLiveRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := registryHost + "/charly-cache-test:live"
-	if _, err := runCachePush(CacheTransferRequest{Dir: src, Ref: ref, Insecure: true}); err != nil {
+	if _, err := runCachePush(spec.CacheTransferRequest{Dir: src, Ref: ref, Insecure: true}); err != nil {
 		t.Fatalf("cache-push failed: %v", err)
 	}
 	dst := filepath.Join(t.TempDir(), "pulled")
-	if _, err := runCachePull(CacheTransferRequest{Dir: dst, Ref: ref, Insecure: true}); err != nil {
+	if _, err := runCachePull(spec.CacheTransferRequest{Dir: dst, Ref: ref, Insecure: true}); err != nil {
 		t.Fatalf("cache-pull failed: %v", err)
 	}
 	got, ok := cache.OpenLayout(dst).Get("live-key")
@@ -145,10 +146,10 @@ func TestCacheInsecureOptionParsed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse without options: %v", err)
 	}
-	if insecure.Context().Registry.Scheme() != "http" {
-		t.Fatalf("Insecure must select the http scheme, got %q", insecure.Context().Registry.Scheme())
+	if insecure.Context().Scheme() != "http" {
+		t.Fatalf("Insecure must select the http scheme, got %q", insecure.Context().Scheme())
 	}
-	if secure.Context().Registry.Scheme() == "http" {
+	if secure.Context().Scheme() == "http" {
 		t.Fatal("without Insecure a non-localhost registry must use https")
 	}
 }
