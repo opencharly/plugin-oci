@@ -76,7 +76,9 @@ func (provider) Invoke(_ context.Context, req *pb.InvokeRequest) (*pb.InvokeRepl
 		return cachePushLeg(req.GetParamsJson())
 	case "cache-pull":
 		return cachePullLeg(req.GetParamsJson())
+	case "container-disk-emit":
+		return containerDiskEmitLeg(req.GetParamsJson())
 	default:
-		return nil, fmt.Errorf("oci: unknown oci_op %q (want merge|inspect-user|cache-push|cache-pull)", env.OciOp)
+		return nil, fmt.Errorf("oci: unknown oci_op %q (want merge|inspect-user|cache-push|cache-pull|container-disk-emit)", env.OciOp)
 	}
 }

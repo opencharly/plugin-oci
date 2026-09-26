@@ -31,7 +31,12 @@ plugin-oci:
             spec/cache.ArtifactStore (already a standard OCI Image Layout) to and from an
             OCI registry — the registry transport for the OCI-manifest-native cache
             (opencharly/spec#148): push = layout.ImageIndex → remote.WriteIndex, pull =
-            remote.Index → layout.Write, auth via authn.DefaultKeychain. `charly box merge`
+            remote.Index → layout.Write, auth via authn.DefaultKeychain. oci_op=container-disk-emit
+            turns a materialized guest disk into a bootable containerDisk OCI image (one
+            gzip tar layer at an in-image path, default /disk/disk.img — the KubeVirt/Cua
+            contract) and pushes it, the produce half of Cua Fleet / KubeVirt support:
+            empty.Image + mutate.AppendLayers → mutate.MediaType(OCIManifestSchema1) →
+            remote.Write. `charly box merge`
             (candy/plugin-box's mergeOneBox, P14) and candy/plugin-build's drive both reach it
             DIRECTLY via Executor.InvokeProvider (verb:oci) — the F10 peer-dispatch leg; the
             ONE remaining core consumer is generate.go's adopt-user resolution, reached via the
@@ -64,6 +69,19 @@ plugin-oci:
               # cleanly when unset).
               check: the plugin ships the verb:oci cache-push / cache-pull transport for a named spec/cache ArtifactStore (an OCI Image Layout) and its lossless layout round-trip is locked by TestCacheTransportDeterministic
               id: oci-cache-transport-present
+              context:
+                - build
+              command: "true"
+            - # ADE build-context check — the containerDisk emitter ships: a guest disk at
+              # an in-image path (default /disk/disk.img) is streamed into a single
+              # gzip-compressed OCI layer (application/vnd.oci.image.layer.v1.tar+gzip,
+              # the media type Cua Fleet requires and buildah cannot set) and pushed to a
+              # registry. The deterministic gate TestContainerDiskEmitDeterministic drives
+              # the REAL leg against an in-memory registry and asserts the one-layer /
+              # +gzip / byte-identical-disk / labels-round-trip contract; the LIVE push is
+              # TestContainerDiskEmitLiveRoundTrip (LIVE_REGISTRY-gated, skips cleanly).
+              check: the plugin ships the verb:oci container-disk-emit op that streams a guest disk into a single +gzip OCI layer at an in-image path and pushes it, locked by TestContainerDiskEmitDeterministic
+              id: oci-container-disk-emit-present
               context:
                 - build
               command: "true"
