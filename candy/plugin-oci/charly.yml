@@ -22,8 +22,9 @@ plugin-oci:
             when it is not. Placement is invisible above the provider registry.
 
             verb:oci is a pure INTERNAL RPC verb — NEVER authored as an `oci:` check step
-            (it declares NO InputDef and ships NO schema; the load gate waives an input-less
-            plugin). It is keyed by an OciOp env discriminator (mirroring the vm plugin's
+            (it declares no structured InputDef, and it ships its OWN self-contained CUE
+            schema, schema/oci.cue, served over Describe — there is NO schema-less plugin).
+            It is keyed by an OciOp env discriminator (mirroring the vm plugin's
             VmOp): oci_op=merge decodes a spec.MergeRequest and returns a spec.MergeReply
             (layer counts + progress Notes the host prints; a per-merge failure rides
             Reply.Error), oci_op=inspect-user decodes a spec.ImageUserInput and returns a

@@ -13,13 +13,15 @@
 // cmd/serve serves them OUT-OF-PROCESS on a custom build that omits it). The verb is
 // NOT authored as a `oci:` check step; it is a pure INTERNAL RPC verb reached by the
 // host's merge/inspect-user consumers, keyed by an OciOp env discriminator (mirroring
-// the vm plugin's VmOp) — so it declares NO InputDef and ships NO schema (the load
-// gate waives an input-less plugin). A standalone Go module (its own go.mod) carrying
+// the vm plugin's VmOp) — it declares no structured InputDef, and it ships its OWN
+// self-contained CUE schema (schema/oci.cue) served over Describe: there is NO
+// schema-less plugin. A standalone Go module (its own go.mod) carrying
 // the go-containerregistry stack, so charly/go.mod links go-containerregistry nowhere.
 package oci
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"fmt"
 
@@ -27,20 +29,24 @@ import (
 	pb "github.com/opencharly/spec/proto"
 )
 
+//go:embed schema/*.cue
+var schemaFS embed.FS
+
 // calver is this plugin candy's CalVer identity (matches charly.yml version:).
 const calver = "2026.194.1200"
 
 // NewProvider returns the oci provider (verb:oci — the merge + inspect-user internal ops).
 func NewProvider() pb.ProviderServer { return &provider{} }
 
-// NewMeta advertises verb:oci. InputDef is "" (no authored `oci:` check step — the
-// verb is a pure INTERNAL RPC keyed by the OciOp env discriminator), so the plugin
-// ships NO CUE schema — BuildCapabilities waives the schema for an input-less plugin
-// (nil schemaFS).
+// NewMeta advertises verb:oci plus this plugin's OWN self-contained CUE schema
+// (schema/oci.cue) served over Describe — there is NO schema-less plugin. InputDef is
+// "" (no authored `oci:` check step — the verb is a pure INTERNAL RPC keyed by the
+// OciOp env discriminator), so the schema documents the op vocabulary rather than a
+// structured plugin_input.
 func NewMeta() pb.PluginMetaServer {
 	return sdk.NewMeta(calver,
 		[]sdk.ProvidedCapability{{Class: "verb", Word: "oci"}},
-		nil)
+		schemaFS)
 }
 
 type provider struct{ pb.UnimplementedProviderServer }
