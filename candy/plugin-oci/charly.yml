@@ -1,7 +1,5 @@
-version: 2026.232.0520
 plugin-oci:
     candy:
-        version: 2026.194.1200
         description: |-
             OUT-OF-TREE charly plugin serving the `oci` VERB (verb:oci) — the OCI IMAGE
             ENGINE externalized from charly core (the P14a cutover). It OWNS the
