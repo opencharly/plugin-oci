@@ -329,6 +329,26 @@ func TestCachePullIndexRefStaysAnIndex(t *testing.T) {
 			t.Fatalf("entry %d = %s, want %s", i, idx.Manifests[i].Digest, m.Digest)
 		}
 	}
+
+	// ⚑ THE INDEX ARM'S SHAPE IS A CONTRACT, NOT A STYLE — pinned here because the
+	// tempting "wrap it like the image arm does" change BREAKS it, measured:
+	// `layout.Write(empty.Index)` + `AppendDescriptor(index)` produces an `index.json`
+	// carrying ONE root descriptor, and `spec/cache`'s Layout reads index.json's manifests
+	// BY TAG-DERIVED KEY, so the named entries (`alpha`/`beta`) stop resolving and
+	// `TestCacheTransportDeterministic` fails with `key "alpha" missing after transport
+	// round-trip`. So the index arm must write the fetched index AS `index.json`, and the
+	// two assertions below are what a wrapper would violate:
+	//   (a) index.json's OWN bytes hash to the digest the transport REPORTED — the whole
+	//       index IS the artifact (this is also the first branch of the ingest leg's own
+	//       `stagedArtifactOf`, which accepts either shape by measurement), and
+	//   (b) index.json holds the index's N entry descriptors, not 1.
+	ownSum := "sha256:" + fmt.Sprintf("%x", sha256.Sum256(rawIndex))
+	if ownSum != pulled.Digest {
+		t.Fatalf("index.json hashes to %s but the transport reported %s — a consumer can no longer tell the staged index IS the artifact", ownSum, pulled.Digest)
+	}
+	if len(idx.Manifests) == 1 {
+		t.Fatal("index.json carries a single root descriptor — the index was wrapped, which stops spec/cache's key-by-tag resolution (measured: key \"alpha\" goes missing)")
+	}
 }
 
 // liveRegistryHost resolves the host the arm should run against: the LIVE_REGISTRY
