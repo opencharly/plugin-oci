@@ -82,7 +82,11 @@ func (provider) Invoke(_ context.Context, req *pb.InvokeRequest) (*pb.InvokeRepl
 		return cachePushLeg(req.GetParamsJson())
 	case "cache-pull":
 		return cachePullLeg(req.GetParamsJson())
+	case "plugin-push":
+		return pluginPushLeg(req.GetParamsJson())
+	case "plugin-pull":
+		return pluginPullLeg(req.GetParamsJson())
 	default:
-		return nil, fmt.Errorf("oci: unknown oci_op %q (want merge|inspect-user|cache-push|cache-pull)", env.OciOp)
+		return nil, fmt.Errorf("oci: unknown oci_op %q (want merge|inspect-user|cache-push|cache-pull|plugin-push|plugin-pull)", env.OciOp)
 	}
 }

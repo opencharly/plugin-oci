@@ -25,8 +25,11 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/layout"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 	pb "github.com/opencharly/spec/proto"
 	"github.com/opencharly/spec/spec"
 )
@@ -113,30 +116,95 @@ func runCachePush(req spec.CacheTransferRequest) (spec.CacheTransferReply, error
 	return reply, nil
 }
 
-// runCachePull fetches req.Ref and writes the whole index into req.Dir.
+// refNameAnnotation is the OCI annotation a layout descriptor carries to name the
+// reference it was fetched from. It is the same annotation `remote.WriteIndex` sets
+// on a pushed index descriptor, so a pulled single-image entry is addressable by the
+// ref it came from rather than by position.
+const refNameAnnotation = "org.opencontainers.image.ref.name"
+
+// runCachePull fetches req.Ref and writes it into req.Dir as an OCI layout.
+//
+// ONE FETCH, DISPATCHED ON THE DESCRIPTOR'S MEDIA TYPE. A registry serves two shapes and
+// the cache transport must carry both: an INDEX/list (what a named ArtifactStore is) and a
+// SINGLE IMAGE (what a registry serves for an ordinary image tag). The earlier
+// `remote.Index(ref)`-only form could not fetch the second — measured by the ingest leg
+// (`plugin-cache`): `remote.Index(single-image)` fails with
+//
+//	unexpected media type for ImageIndex(): application/vnd.docker.distribution.manifest.v2+json; call Image() instead
+//
+// and it is a hard error, not a fallback, so nothing downstream could work around it.
+//
+// The dispatch is keyed on the MEDIA TYPE and is deliberately NOT `ImageIndex()`-then-
+// fall-back-to-`Image()`: on an index ref `desc.Image()` does not fail, it silently
+// resolves the index to whichever single platform it picks, so a fall-back would quietly
+// turn every index pull into a one-platform image. `remote.Get` fetches the manifest once
+// and its descriptor says which shape arrived; each arm then writes the layout shape it
+// owns. No retry, no second client, no fall-through branch.
 func runCachePull(req spec.CacheTransferRequest) (spec.CacheTransferReply, error) {
 	ref, err := name.ParseReference(req.Ref, parseOpts(req.Insecure)...)
 	if err != nil {
 		return spec.CacheTransferReply{}, fmt.Errorf("parse ref %q: %w", req.Ref, err)
 	}
-	ii, err := remote.Index(ref, remoteOpts()...)
+	desc, err := remote.Get(ref, remoteOpts()...)
 	if err != nil {
 		return spec.CacheTransferReply{}, fmt.Errorf("pull %s: %w", ref, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(req.Dir), 0o755); err != nil {
 		return spec.CacheTransferReply{}, err
 	}
-	if _, err := layout.Write(req.Dir, ii); err != nil {
-		return spec.CacheTransferReply{}, fmt.Errorf("write layout %s: %w", req.Dir, err)
+	switch desc.MediaType {
+	case types.OCIImageIndex, types.DockerManifestList:
+		ii, ierr := desc.ImageIndex()
+		if ierr != nil {
+			return spec.CacheTransferReply{}, fmt.Errorf("read index %s: %w", ref, ierr)
+		}
+		if _, werr := layout.Write(req.Dir, ii); werr != nil {
+			return spec.CacheTransferReply{}, fmt.Errorf("write layout %s: %w", req.Dir, werr)
+		}
+		// The reply for an index records the INDEX's own digest and its entry count —
+		// the shape `charly cache status`/`push` report, unchanged by this dispatch.
+		reply := spec.CacheTransferReply{Ref: ref.String()}
+		if dgst, derr := ii.Digest(); derr == nil {
+			reply.Digest = dgst.String()
+		}
+		if im, ierr := ii.IndexManifest(); ierr == nil {
+			reply.Entries = len(im.Manifests)
+		}
+		return reply, nil
+	case types.OCIManifestSchema1, types.DockerManifestSchema2:
+		img, ierr := desc.Image()
+		if ierr != nil {
+			return spec.CacheTransferReply{}, fmt.Errorf("read image %s: %w", ref, ierr)
+		}
+		if werr := writeImageLayout(req.Dir, img, ref.String()); werr != nil {
+			return spec.CacheTransferReply{}, fmt.Errorf("write layout %s: %w", req.Dir, werr)
+		}
+		reply := spec.CacheTransferReply{Ref: ref.String(), Entries: 1}
+		if dgst, derr := img.Digest(); derr == nil {
+			reply.Digest = dgst.String()
+		}
+		return reply, nil
+	default:
+		return spec.CacheTransferReply{}, fmt.Errorf("pull %s: unsupported manifest media type %q (want an image index/list or an image manifest)", ref, desc.MediaType)
 	}
-	reply := spec.CacheTransferReply{Ref: ref.String()}
-	if dgst, derr := ii.Digest(); derr == nil {
-		reply.Digest = dgst.String()
+}
+
+// writeImageLayout writes ONE pulled image as an OCI layout whose top-level index carries
+// that image as its single descriptor, annotated with the ref it was fetched from.
+//
+// This is the shape `layout.AppendImage` owns (`charly registry cache add` used it for the
+// same reason), and it is what makes the layout readable by the same index-driven reader
+// on both arms: `spec/cache`'s Layout reads `index.json`'s manifests, so a layout whose
+// `index.json` is a bare image MANIFEST — which is exactly what writing a single image
+// without an index produces — has no index to read. Measured: the append shape yields
+// `index.json` mediaType application/vnd.oci.image.index.v1+json with exactly one
+// descriptor pointing at the image manifest digest, i.e. one root descriptor per layout.
+func writeImageLayout(dir string, img v1.Image, ref string) error {
+	lp, err := layout.Write(dir, empty.Index)
+	if err != nil {
+		return err
 	}
-	if im, ierr := ii.IndexManifest(); ierr == nil {
-		reply.Entries = len(im.Manifests)
-	}
-	return reply, nil
+	return lp.AppendImage(img, layout.WithAnnotations(map[string]string{refNameAnnotation: ref}))
 }
 
 // parseOpts translates the Insecure flag to a name option: a plain-HTTP
