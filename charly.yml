@@ -11,3 +11,142 @@
 discover:
     - path: candy
       recursive: true
+
+# ---------------------------------------------------------------------------
+# THE R10 BED for the plugin-artifact transport (plugin-push / plugin-pull).
+#
+# SHAPE (the plugin-cache and charly-registry precedent): a `kind:local` TEMPLATE
+# that installs nothing (`candy: []` is required there) and carries NO plan —
+# measured: a template's `plan:` is NOT carried into the composed deploy, so checks
+# declared there silently never run — plus a `disposable: true` DEPLOY that composes
+# it and carries the `plan:`.
+#
+# THE VENUE IS COMPOSED, WHICH IS THE ONE WAY THIS BED DIFFERS FROM ITS SIBLING.
+# The plugin-cache bed reads from a PINNED PUBLIC upstream (`docker.io/library/...`)
+# because a public registry needs no hand-started fixture and that repo owns no
+# service infrastructure — and it says plainly that a public upstream cannot be
+# STOPPED. This transport must PUSH, so the bed cannot use a public upstream at all:
+# it composes the operator-approved reference registry (`registry:2` on
+# 127.0.0.1:5000) as part of its own run, addresses it BY DECLARATION, and tears it
+# down. `disposable: true` is what authorizes the registry container's removal.
+#
+# THE BINARY IS `${CHARLY_BIN}` — BRACED, never a bare `charly`: a bare word resolves
+# from the step's PATH and can measure a STALE install (a step that runs something,
+# but not the thing under test). The unbraced form is also unbound under `set -u`
+# while the step can still report PASS, which is worse than a failure.
+#
+# NO `| tee`: a pipeline's status is the LAST command's, so a step that does nothing
+# can exit 0 and satisfy a `stdout:` matcher. Each step here writes its evidence to a
+# RETAINED log, asserts EVERY line of it, and lets the step's status be those
+# assertions.
+#
+# `context: [runtime]` is required: a bed's own `run:` step is verify-only, so every
+# mutation lives in a `check:` step.
+# ---------------------------------------------------------------------------
+plugin-artifact-check:
+    local:
+        description: |-
+            Minimal kind:local template for the plugin-artifact transport bed: installs
+            nothing (`candy: []` is required on a kind:local template) and carries no
+            plan — the checks live on the deploy that composes it.
+        candy: []
+
+check-plugin-artifact-transfer:
+    local:
+        from: plugin-artifact-check
+        host: local
+        disposable: true
+        lifecycle: test
+        plan:
+            - check: >-
+                  a real distribution-spec registry is up on the declared 127.0.0.1:5000 and the
+                  binary the bed drives is the one under review — printed from ${CHARLY_BIN}
+              id: pat-venue-and-binary
+              context: [runtime]
+              timeout: 300s
+              exit_status: 0
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    echo "the binary under test is ${CHARLY_BIN}"
+                    ${CHARLY_BIN} version | tail -1
+                    echo "the plugin source under review is the checkout this run is rooted in"
+                    test -f candy/plugin-oci/plugin_artifact.go
+                    echo "starting the DECLARED reference registry (registry:2 on 127.0.0.1:5000)"
+                    podman rm -f pat-oci-registry >/dev/null 2>&1 || true
+                    podman run -d --name pat-oci-registry -p 127.0.0.1:5000:5000 registry:2 >/dev/null
+                    for i in $(seq 1 30); do
+                        curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1 && break
+                        sleep 1
+                    done
+                    curl -fsS http://127.0.0.1:5000/v2/ >/dev/null
+                    echo "the registry answers /v2/ on the declared address"
+            - check: >-
+                  the plugin ARTIFACT legs run LIVE against that registry: a real artifact layout is
+                  pushed, pulled back into a fresh directory, and every entry survives byte-identical
+                  — no skip, no mock
+              id: pat-plugin-live-transfer
+              context: [runtime]
+              timeout: 1800s
+              exit_status: 0
+              stdout:
+                contains: PAT-PLUGIN-LIVE-OK
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    ROOT="$PWD"
+                    cd candy/plugin-oci
+                    LOG="$ROOT/.check/plugin-artifact-transfer.log"; mkdir -p "$(dirname "$LOG")"
+                    export LIVE_REGISTRY=127.0.0.1:5000
+                    if go test ./... -run TestPluginArtifactLiveRoundTrip -count=1 -v >"$LOG" 2>&1; then :; else rc=$?; cat "$LOG"; exit $rc; fi
+                    grep -q -- "--- PASS: TestPluginArtifactLiveRoundTrip" "$LOG" || { echo "the live artifact round-trip did not PASS against the running registry"; cat "$LOG"; exit 1; }
+                    if grep -q -- "--- SKIP: TestPluginArtifactLiveRoundTrip" "$LOG"; then echo "the live arm SKIPPED beside a running registry — the credential gate is not what ran"; cat "$LOG"; exit 1; fi
+                    grep -q -- "LIVE_REGISTRY is set — this arm measures the real registry" "$LOG" || { echo "the run did not report measuring a live registry — it may have used an in-memory one"; cat "$LOG"; exit 1; }
+                    cat "$LOG"
+                    echo PAT-PLUGIN-LIVE-OK
+            - check: >-
+                  the cache-pull leg fetches a SINGLE-IMAGE ref — the shape a registry serves for an
+                  ordinary image tag, which the index-only form could not fetch — into a layout whose
+                  top-level index carries exactly one root descriptor annotated with the ref, and the
+                  INDEX arm still carries the whole index rather than one collapsed image
+              id: pat-cache-single-image
+              context: [runtime]
+              timeout: 900s
+              exit_status: 0
+              stdout:
+                contains: PAT-CACHE-SINGLE-OK
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    ROOT="$PWD"
+                    cd candy/plugin-oci
+                    LOG="$ROOT/.check/plugin-artifact-single-image.log"; mkdir -p "$(dirname "$LOG")"
+                    export LIVE_REGISTRY=127.0.0.1:5000
+                    if go test ./... -run 'TestCachePullSingleImageRef|TestCachePullIndexRefStaysAnIndex' -count=1 -v >"$LOG" 2>&1; then :; else rc=$?; cat "$LOG"; exit $rc; fi
+                    for marker in "--- PASS: TestCachePullSingleImageRef" "--- PASS: TestCachePullIndexRefStaysAnIndex"; do
+                        grep -q -- "$marker" "$LOG" || { echo "the named check did not PASS: $marker"; cat "$LOG"; exit 1; }
+                    done
+                    if grep -q -- "--- SKIP:" "$LOG"; then echo "a declared check SKIPPED beside a running registry"; cat "$LOG"; exit 1; fi
+                    grep -q -- "the single-image arm runs LIVE against 127.0.0.1:5000" "$LOG" || { echo "the single-image arm did not report running LIVE against the declared registry"; cat "$LOG"; exit 1; }
+                    grep -q -- "the control failed" "$LOG" && { echo "the index-only control did not fail, so the dispatch is not what made the pull work"; exit 1; } || true
+                    cat "$LOG"
+                    echo PAT-CACHE-SINGLE-OK
+            - check: >-
+                  the venue is torn down after the run and the declared address is free again —
+                  `disposable: true` is what authorizes the registry container's removal
+              id: pat-venue-teardown
+              context: [runtime]
+              timeout: 300s
+              exit_status: 0
+              command:
+                in_container: false
+                command: |
+                    set -eu
+                    podman rm -f pat-oci-registry >/dev/null 2>&1 || true
+                    if curl -fsS http://127.0.0.1:5000/v2/ >/dev/null 2>&1; then
+                        echo "the registry still answers after teardown"; exit 1
+                    fi
+                    echo "the composed venue is gone; the declared address is free"

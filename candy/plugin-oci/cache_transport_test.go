@@ -1,7 +1,9 @@
 package oci
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -11,6 +13,9 @@ import (
 
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
+	"github.com/google/go-containerregistry/pkg/v1/random"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/opencharly/spec/cache"
 	pb "github.com/opencharly/spec/proto"
 	"github.com/opencharly/spec/spec"
@@ -152,6 +157,194 @@ func TestCacheInsecureOptionParsed(t *testing.T) {
 	if secure.Context().Registry.Scheme() == "http" {
 		t.Fatal("without Insecure a non-localhost registry must use https")
 	}
+}
+
+// TestCachePullSingleImageRef is the DETERMINISTIC gate for the media-type dispatch: a
+// registry serves an ordinary image tag as a SINGLE IMAGE manifest, and the pull leg must
+// fetch it. The earlier `remote.Index(ref)`-only form could not, and failed hard:
+//
+//	unexpected media type for ImageIndex(): application/vnd.docker.distribution.manifest.v2+json; call Image() instead
+//
+// Measured by the ingest leg (plugin-cache) against exactly this shape, which is why the
+// assertion is on the CONTENT that lands rather than on an error being absent.
+func TestCachePullSingleImageRef(t *testing.T) {
+	host, live := liveRegistryHost(t, "charly-single-live:one")
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+	if !live {
+		// No LIVE_REGISTRY: the in-memory registry still exercises the dispatch and the
+		// landing shape, so the deterministic arm is real. The BED sets LIVE_REGISTRY (the
+		// declared reference registry), so there this arm runs against a REAL
+		// distribution-spec registry rather than beside one.
+		host = strings.TrimPrefix(srv.URL, "http://")
+		t.Log("LIVE_REGISTRY unset — running the single-image arm against the in-memory registry")
+	}
+
+	// A real single image in the registry: no index anywhere in the transfer.
+	img, err := random.Image(256, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDigest, err := img.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := name.ParseReference(host+"/charly-single:one", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.Write(ref, img); err != nil {
+		t.Fatal(err)
+	}
+	if live {
+		t.Logf("the single-image arm runs LIVE against %s", host)
+	}
+
+	// The failure the fix removes, asserted as the CONTROL: the index-only call must
+	// still fail on this ref, so the test proves the dispatch is what made the pull work
+	// rather than that the registry changed shape.
+	if _, idxErr := remote.Index(ref, remoteOpts()...); idxErr == nil {
+		t.Fatal("the control failed: remote.Index on a single-image ref succeeded, so this test cannot show what the dispatch fixed")
+	}
+
+	dst := filepath.Join(t.TempDir(), "pulled-single")
+	reply, err := cachePullLeg(mustJSON(t, spec.CacheTransferRequest{Dir: dst, Ref: ref.String(), Insecure: true}))
+	if err != nil {
+		t.Fatalf("cachePullLeg on a single-image ref: %v", err)
+	}
+	var pulled spec.CacheTransferReply
+	if err := decodeReply(reply, &pulled); err != nil {
+		t.Fatalf("decode pull reply: %v", err)
+	}
+	if pulled.Digest != wantDigest.String() {
+		t.Fatalf("pull reply digest = %s, want the image digest %s", pulled.Digest, wantDigest)
+	}
+
+	// The landing shape: a readable OCI layout whose top-level index carries the image as
+	// ONE descriptor annotated with the ref — the shape the ingest consumes.
+	rawIndex, err := os.ReadFile(filepath.Join(dst, "index.json"))
+	if err != nil {
+		t.Fatalf("the pull wrote no index.json: %v", err)
+	}
+	var idx struct {
+		MediaType string `json:"mediaType"`
+		Manifests []struct {
+			MediaType   string            `json:"mediaType"`
+			Digest      string            `json:"digest"`
+			Annotations map[string]string `json:"annotations"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal(rawIndex, &idx); err != nil {
+		t.Fatalf("index.json is not an index: %v", err)
+	}
+	if idx.MediaType != string(types.OCIImageIndex) {
+		t.Fatalf("index.json mediaType = %q, want %q (a bare image manifest has no index to read)", idx.MediaType, types.OCIImageIndex)
+	}
+	if len(idx.Manifests) != 1 {
+		t.Fatalf("index.json carries %d descriptors, want exactly ONE root descriptor", len(idx.Manifests))
+	}
+	if idx.Manifests[0].Digest != wantDigest.String() {
+		t.Fatalf("the root descriptor points at %s, want the image manifest %s", idx.Manifests[0].Digest, wantDigest)
+	}
+	if got := idx.Manifests[0].Annotations[refNameAnnotation]; got != ref.String() {
+		t.Fatalf("the root descriptor annotation %s = %q, want the ref %q", refNameAnnotation, got, ref.String())
+	}
+
+	// And the bytes really landed: the image manifest in the layout hashes to the digest
+	// the reply named, so this is content and not a descriptor pointing at nothing.
+	blob, err := os.ReadFile(filepath.Join(dst, "blobs", "sha256", wantDigest.Hex))
+	if err != nil {
+		t.Fatalf("the pulled image manifest is not in the layout: %v", err)
+	}
+	gotSum := "sha256:" + fmt.Sprintf("%x", sha256.Sum256(blob))
+	if gotSum != wantDigest.String() {
+		t.Fatalf("the pulled manifest hashes to %s, want %s", gotSum, wantDigest)
+	}
+}
+
+// TestCachePullIndexRefStaysAnIndex pins the OTHER arm against the tempting wrong fix:
+// `desc.Image()` does NOT fail on an index ref — it silently resolves the index to one
+// platform's image — so a dispatch shaped "try ImageIndex, fall back to Image" would turn
+// every index pull into a single-platform image. The index arm therefore has to be keyed on
+// the media type, and this test fails if it ever stops being one: the pulled layout must
+// still carry the index's whole entry set, not one image.
+func TestCachePullIndexRefStaysAnIndex(t *testing.T) {
+	host, live := liveRegistryHost(t, "charly-index-live:multi")
+	srv := httptest.NewServer(registry.New())
+	defer srv.Close()
+	if !live {
+		host = strings.TrimPrefix(srv.URL, "http://")
+	}
+
+	// An INDEX ref carrying two DISTINCT platform entries.
+	ii, err := random.Index(256, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := name.ParseReference(host+"/charly-index:multi", name.Insecure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := remote.WriteIndex(ref, ii); err != nil {
+		t.Fatal(err)
+	}
+	if live {
+		t.Logf("the index arm runs LIVE against %s", host)
+	}
+	wantIM, err := ii.IndexManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "pulled-index")
+	reply, err := cachePullLeg(mustJSON(t, spec.CacheTransferRequest{Dir: dst, Ref: ref.String(), Insecure: true}))
+	if err != nil {
+		t.Fatalf("cachePullLeg on an index ref: %v", err)
+	}
+	var pulled spec.CacheTransferReply
+	if err := decodeReply(reply, &pulled); err != nil {
+		t.Fatalf("decode pull reply: %v", err)
+	}
+	if pulled.Entries != len(wantIM.Manifests) || pulled.Entries < 2 {
+		t.Fatalf("pull reply entries = %d, want the index's %d (an index ref must not collapse to one image)", pulled.Entries, len(wantIM.Manifests))
+	}
+
+	rawIndex, err := os.ReadFile(filepath.Join(dst, "index.json"))
+	if err != nil {
+		t.Fatalf("the pull wrote no index.json: %v", err)
+	}
+	var idx struct {
+		Manifests []struct {
+			Digest string `json:"digest"`
+		} `json:"manifests"`
+	}
+	if err := json.Unmarshal(rawIndex, &idx); err != nil {
+		t.Fatalf("index.json is not an index: %v", err)
+	}
+	if len(idx.Manifests) != len(wantIM.Manifests) {
+		t.Fatalf("the pulled layout carries %d entries, want the index's %d (the index was collapsed)", len(idx.Manifests), len(wantIM.Manifests))
+	}
+	for i, m := range wantIM.Manifests {
+		if idx.Manifests[i].Digest != m.Digest.String() {
+			t.Fatalf("entry %d = %s, want %s", i, idx.Manifests[i].Digest, m.Digest)
+		}
+	}
+}
+
+// liveRegistryHost resolves the host the arm should run against: the LIVE_REGISTRY
+// environment (the bed sets it to the reference registry it composes) when present, else
+// "". `want` is the tag the caller will push, so a live run cannot collide with another
+// arm's ref. A live arm is reported through t.Log so the retained evidence names which
+// registry the run actually measured — the difference between running live and skipping
+// beside a live registry is exactly what R8 turns on.
+func liveRegistryHost(t *testing.T, want string) (string, bool) {
+	t.Helper()
+	host := os.Getenv("LIVE_REGISTRY")
+	if host == "" {
+		return "", false
+	}
+	t.Logf("LIVE_REGISTRY is set — this arm measures the real registry %s (pushing %s)", host, want)
+	return host, true
 }
 
 // mustJSON marshals a request for the leg entrypoints; decodeReply unmarshals a

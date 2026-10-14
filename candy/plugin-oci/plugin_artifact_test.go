@@ -459,6 +459,10 @@ func TestPluginArtifactLiveRoundTrip(t *testing.T) {
 	if registryHost == "" {
 		t.Skip("LIVE_REGISTRY unset — skipping the live registry round-trip (set it to e.g. localhost:5001)")
 	}
+	// The arm reports the registry it measured, so a retained log distinguishes a run that
+	// measured a REAL registry from one that skipped beside it — the distinction R8 turns on,
+	// and the reason the bed asserts this line.
+	t.Logf("LIVE_REGISTRY is set — this arm measures the real registry %s", registryHost)
 	fx := artifactFixture()
 	src := filepath.Join(t.TempDir(), "src")
 	writeFixtureLayout(t, src, fx)
