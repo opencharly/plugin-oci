@@ -13,7 +13,7 @@
 // NO `cue exp gengotypes` artifact — it is the SERVED documentation/config surface,
 // not a code-generation source.
 //
-// It DOCUMENTS the internal `verb: oci` op vocabulary — `merge` / `inspect-user` / `cache-push` / `cache-pull` — keyed by the `oci_op` env discriminator. The host's merge / inspect-user / cache consumers reach the verb directly.
+// It DOCUMENTS the internal `verb: oci` op vocabulary — `merge` / `inspect-user` / `cache-push` / `cache-pull` / `plugin-push` / `plugin-pull` — keyed by the `oci_op` env discriminator. The host's merge / inspect-user / cache / plugin-artifact consumers reach the verb directly.
 #OciPlugin: {
 	// The verb word the plugin serves.
 	verb: "oci"
@@ -22,5 +22,10 @@
 	contract: string & !=""
 
 	// The internal ops the verb dispatches, keyed by the `oci_op` env discriminator.
-	ops: ["merge", "inspect-user", "cache-push", "cache-pull"]
+	// `plugin-push` / `plugin-pull` move a PLUGIN ARTIFACT (a provider binary + the candy
+	// charly.yml + the `.providers` word manifest, under a per-platform index) between a
+	// local OCI layout and any distribution-spec registry. They move bytes and verify
+	// them; the artifact's own format is assembled by the shared sdk mechanism, so an
+	// emitter and a consumer cannot disagree about what they are shipping.
+	ops: ["merge", "inspect-user", "cache-push", "cache-pull", "plugin-push", "plugin-pull"]
 }
